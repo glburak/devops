@@ -52,7 +52,8 @@ pipeline {
             steps { // script start
 
                 script {
-                    String branch_name = new String(env.BRANCH_NAME)
+                    String branch_name
+                    = new String(env.BRANCH_NAME)
                     if ((branch_name =~ "v\\d{1,2}\\.\\d{1,2}\\.\\d{1,2}").matches()) {
                         container('base') {
                             pushRegistry()
@@ -122,7 +123,7 @@ pipeline {
         KUBECONFIG_CREDENTIAL_ID = 'kubeconfig'
         REGISTRY = 'reg.example.ai'
         REGISTRY_EXT = 'registry.example.ai'
-        DOCKERHUB_NAMESPACE = 'dijitalplatformlar'
+        DOCKERHUB_NAMESPACE = 'platformlar'
         SONAR_SERVER = 'https://sonarqube.example.ai'
         SONAR_VERIFY = 'sonar-verify'
         SONAR_CREDENTIAL_ID = 'sonar-token'
