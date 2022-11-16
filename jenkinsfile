@@ -1,0 +1,234 @@
+pipeline {
+    agent {
+        node {
+            label 'maven'
+        }
+    }
+
+    stages {
+        stage('git clone') {
+            agent none
+            steps {
+                script {
+                    git(url: 'git@gitlabkurumsal.example.com.tr:expo-saas/eureka-service.git', credentialsId: 'botgitlab', branch: '$BRANCH_NAME', changelog: true, poll: false)
+                    env.GIT_COMMIT_MSG = sh (script: 'git log -1 --pretty=%B ${GIT_COMMIT}', returnStdout: true).trim()
+                    env.GIT_AUTHOR = sh (script: 'git log -1 --pretty=%cn ${GIT_COMMIT}', returnStdout: true).trim()
+                    sendMessage('commit')
+                    currentBuild.result = 'SUCCESS'
+                }
+            }
+        }
+
+        stage('sonarScanner') {
+            steps {
+                withCredentials(
+                        [string(credentialsId : "$SONAR_CREDENTIAL_ID" ,variable : 'SONAR_TOKEN' ,),
+                         string(credentialsId : "$SONAR_VERIFY" ,variable : 'VERIFY' ,)])
+                        {
+                            container('sonarscanner') {
+                                sh 'mkdir -p kubernetes'
+                                sh 'wget "https://nexus.example.ai/service/rest/v1/search/assets/download?sort=version&repository=maven-releases&maven.groupId=org.projectlombok&maven.artifactId=lombok&maven.extension=jar" -O kubernetes/lombok.jar'
+                                sh 'ls -l kubernetes/'
+                                sh 'sonar-scanner -Dsonar.language=java  -Dsonar.java.libraries=kubernetes/*.jar -Dsonar.projectKey=$PROJECT_NAME -Dsonar.qualitygate.wait=$VERIFY -Dsonar.projectVersion=$BRANCH_NAME-$BUILD_NUMBER -Dsonar.host.url=$SONAR_SERVER -Dsonar.java.binaries=. -Dsonar.login=$SONAR_TOKEN'
+                            }
+                        }
+            }
+        }
+
+        // maven build
+        stage('mave build') {
+            steps {
+                container('maven') {
+                    sh 'ls -l'
+                    sh 'mvn -version'
+                    sh 'mvn install -DskipTests'
+                }
+            }
+        }
+
+//build ve push
+
+        stage('docker build') {
+            steps { // script start
+
+                script {
+                    String branch_name = new String(env.BRANCH_NAME)
+                    if ((branch_name =~ "v\\d{1,2}\\.\\d{1,2}\\.\\d{1,2}").matches()) {
+                        container('base') {
+                            pushRegistry()
+                        }
+                    } else if (branch_name.equals('dev')) {
+                        container('base') {
+                           pushRegistry()
+                        }
+                    } else if (branch_name.equals('test')) {
+                            container('base') {
+                           pushRegistry()
+                        }
+                    }
+                }
+            } // script end
+        }
+        stage ('helm'){
+            steps {
+
+                script {
+                if ((branch_name =~ "v\\d{1,2}\\.\\d{1,2}\\.\\d{1,2}").matches()) {
+                    container('helm') {
+                        helmPush('prod')
+                    }
+                }else {
+                    container('helm') {
+                        helmPush('')
+                    }
+                }
+
+            }
+            }
+        }
+        stage('deploy') {
+            steps { // script start
+
+                script {
+                    String branch_name = new String(env.BRANCH_NAME)
+                    if ((branch_name =~ "v\\d{1,2}\\.\\d{1,2}\\.\\d{1,2}").matches()) {
+                        container('argocd') {
+                            argocd('aws', '-prod')
+                        }
+                    } else if (branch_name.equals("test")) {
+                        container('argocd') {
+                            argocd('test', '-slot1')
+                        }
+                    } else if (branch_name.equals("dev")) {
+                        container('argocd') {
+                            argocd('test', '-dev')
+                        }
+                    }
+                    sendMessage('success')
+                }
+            } // script end
+        }
+    }
+    post {
+        failure {
+            sendMessage('fail')
+        }
+    }
+    environment {
+        ARGOCD_CREDANTIAL = 'argocd'
+        DOCKER_CREDENTIAL_ID = 'regint'
+        DOCKER_CREDENTIAL_ID_EXT = 'regext'
+        DOCKER_HUB = 'dockerhub'
+        KUBECONFIG_CREDENTIAL_ID = 'kubeconfig'
+        REGISTRY = 'reg.example.ai'
+        REGISTRY_EXT = 'registry.example.ai'
+        DOCKERHUB_NAMESPACE = 'dijitalplatformlar'
+        SONAR_SERVER = 'https://sonarqube.example.ai'
+        SONAR_VERIFY = 'sonar-verify'
+        SONAR_CREDENTIAL_ID = 'sonar-token'
+        NAMESPACE = 'expo-saas'
+        PROJECT_NAME = 'eureka-service'
+        PROJECT_MEMBER = '<@U02B3QQ8J1G>'
+        HELM_CHART_REPO='bot'
+
+    }
+}
+def pushRegistry() {
+
+    withCredentials([usernamePassword(credentialsId : "$DOCKER_HUB" ,passwordVariable : 'DOCKER_PASSWORD' ,usernameVariable : 'DOCKER_USERNAME' ,)]) {
+      sh 'echo "$DOCKER_PASSWORD" | docker login  -u "$DOCKER_USERNAME" --password-stdin'
+      sh 'docker build  -t $DOCKERHUB_NAMESPACE/$PROJECT_NAME:$BRANCH_NAME .'
+      sh 'docker push $DOCKERHUB_NAMESPACE/$PROJECT_NAME:$BRANCH_NAME'
+    }
+    slackSend color: '#34e369', message: "project: ${env.PROJECT_NAME}, author: ${env.GIT_AUTHOR} , build & push stage SUCCESS  <@U02BA0W261J> <@U018LBC77BP> <@U02BA13J3KN>"
+
+
+}
+
+
+def helmPush(String version) {
+  
+  if (version.equals('prod')){
+    withCredentials([
+        usernamePassword(credentialsId : "$DOCKER_CREDENTIAL_ID_EXT" ,passwordVariable : 'REGEXT_PASSWORD' ,usernameVariable : 'REGEXT_USERNAME' ,),
+        usernamePassword(credentialsId : "$HELM_CHART_REPO" ,passwordVariable : 'CHARTREPO_PASSWORD' ,usernameVariable : 'CHARTREPO_USERNAME' ,),
+        
+        ]) {
+        sh '''
+                git version
+                git clone https://$CHARTREPO_USERNAME:$CHARTREPO_PASSWORD@gitlabkurumsal.example.com.tr/burak.gul/helm-charts.git            
+                cd helm-charts/expo-saas
+                helm package --version $BRANCH_NAME --app-version "$BRANCH_NAME"  "$PROJECT_NAME"
+                helm repo add --username="$REGEXT_USERNAME" --password="$REGEXT_PASSWORD" expo https://registry.example.ai/chartrepo/expo-saas
+                helm cm-push --username="$REGEXT_USERNAME" --password="$REGEXT_PASSWORD" *.tgz expo
+            '''
+    }
+  }else {
+    withCredentials([
+        usernamePassword(credentialsId : "$DOCKER_CREDENTIAL_ID_EXT" ,passwordVariable : 'REGEXT_PASSWORD' ,usernameVariable : 'REGEXT_USERNAME' ,),
+        usernamePassword(credentialsId : "$HELM_CHART_REPO" ,passwordVariable : 'CHARTREPO_PASSWORD' ,usernameVariable : 'CHARTREPO_USERNAME' ,),
+       
+        ]) {
+        sh '''
+                git version
+                git clone https://$CHARTREPO_USERNAME:$CHARTREPO_PASSWORD@gitlabkurumsal.example.com.tr/burak.gul/helm-charts.git            
+                cd helm-charts/expo-saas
+                helm package --version v0.1-$BRANCH_NAME --app-version "$BRANCH_NAME"  "$PROJECT_NAME"
+                helm repo add --username="$REGEXT_USERNAME" --password="$REGEXT_PASSWORD" expo https://registry.example.ai/chartrepo/expo-saas
+                helm cm-push --username="$REGEXT_USERNAME" --password="$REGEXT_PASSWORD" *.tgz expo
+            '''
+    }
+  }
+}
+
+def argocd(String cluster, String suffix) {
+    env.project = env.PROJECT_NAME + suffix
+    if (cluster.equals('test')) {
+        withCredentials([usernamePassword(credentialsId : "$ARGOCD_CREDANTIAL" ,passwordVariable : 'ARGO_PASSWORD' ,usernameVariable : 'ARGO_USERNAME' ,)]) {
+            echo 'dev environment'
+            sh """
+            bra=${env.project}
+            argocd login argocd-server.devops.svc.cluster.local --username "$ARGO_USERNAME" --password "$ARGO_PASSWORD" --insecure
+            argocd app set \$bra -p image.repository=$DOCKERHUB_NAMESPACE/$PROJECT_NAME -p branch=$BRANCH_NAME
+            argocd app get \$bra --hard-refresh
+            argocd app sync \$bra --force --revision v0.1-"$BRANCH_NAME"
+            argocd app actions run \$bra restart --kind Deployment --grpc-web
+        """
+        }
+    }else if (cluster.equals('aws')) {
+        withCredentials([usernamePassword(credentialsId : "$ARGOCD_CREDANTIAL" ,passwordVariable : 'ARGO_PASSWORD' ,usernameVariable : 'ARGO_USERNAME' ,)]) {
+            echo 'aws prod environment'
+            sh """
+            bra=${env.project}
+            argocd login argocd-server.devops.svc.cluster.local --username "$ARGO_USERNAME" --password "$ARGO_PASSWORD" --insecure
+            argocd app set \$bra -p image.repository=$DOCKERHUB_NAMESPACE/$PROJECT_NAME -p branch=prod
+            argocd app get \$bra --hard-refresh
+            argocd app sync \$bra --force --revision "$BRANCH_NAME"
+            argocd app actions run \$bra restart --kind Deployment --grpc-web
+        """
+        }
+    }
+}
+def sendMessage(String messagetype){
+    if (messagetype.equals('fail')) {
+        blocks = [
+                [
+                        "type"     : "section",
+                        "text"     : [
+                                "type": "mrkdwn",
+                                "text": "<https://kube.example.ai/example-project/clusters/host/devops/expo-saas2vz6g/pipelines/eureka-service/branch/development/run/$BUILD_NUMBER/task-status|Check KubeSphere >\nproject:*$PROJECT_NAME*\nbranch:*$BRANCH_NAME*\nauthor:*$GIT_AUTHOR*\n`Pipeline Failed` <@U02FNKLH0J1> <@U02B3QQ8J1G> <@U02BTDRPA8G>"
+                        ],
+                        "accessory": [
+                                "type"     : "image",
+                                "image_url": "https://image.shutterstock.com/image-vector/boom-isolated-white-comic-text-600w-1322869142.jpg",
+                                "alt_text" : "Action Required"
+                        ]
+                ]
+        ]
+        slackSend(channel: "#devops", blocks: blocks)
+    } else if (messagetype.equals('commit')){
+        slackSend color: '#3683ff', message: "project:*$PROJECT_NAME*, branch:*$BRANCH_NAME*, author:*$GIT_AUTHOR* commit pushed. _Commit message:_\n>_ $GIT_COMMIT_MSG _"
+    } else if (messagetype.equals('success')){
+        slackSend color: '#34e369', message: "project:*$PROJECT_NAME*, branch:*$BRANCH_NAME*, author:*$GIT_AUTHOR* pipeline SUCCESS <@U02RCHFEUUQ>"
+    }
+}
